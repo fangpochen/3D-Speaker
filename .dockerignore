@@ -1,0 +1,16 @@
+.git
+.gitignore
+.pre-commit-config.yaml
+LICENSE
+README.md
+docs/
+egs/
+runtime/
+voice_auth_db/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+*.log 

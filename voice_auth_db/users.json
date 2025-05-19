@@ -1,0 +1,14 @@
+{
+  "1": {
+    "name": "1",
+    "samples": [
+      "1_sample_1"
+    ]
+  },
+  "2": {
+    "name": "2",
+    "samples": [
+      "2_sample_1"
+    ]
+  }
+}

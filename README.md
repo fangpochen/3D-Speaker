@@ -1,172 +1,246 @@
+# 声纹识别系统
 
-<p align="center">
-    <br>
-    <img src="docs/images/3D-Speaker-logo.png" width="400"/>
-    <br>
-<p>
-    
-<div align="center">
-    
-<!-- [![Documentation Status](https://readthedocs.org/projects/easy-cv/badge/?version=latest)](https://easy-cv.readthedocs.io/en/latest/) -->
-![license](https://img.shields.io/github/license/modelscope/modelscope.svg)
-<a href=""><img src="https://img.shields.io/badge/OS-Linux-orange.svg"></a>
-<a href=""><img src="https://img.shields.io/badge/Python->=3.8-aff.svg"></a>
-<a href=""><img src="https://img.shields.io/badge/Pytorch->=1.10-blue"></a>
-    
-</div>
-    
-<strong>3D-Speaker</strong> is an open-source toolkit for single- and multi-modal speaker verification, speaker recognition, and speaker diarization. All pretrained models are accessible on [ModelScope](https://www.modelscope.cn/models?page=1&tasks=speaker-verification&type=audio). Furthermore, we present a large-scale speech corpus also called [3D-Speaker-Dataset](https://3dspeaker.github.io/) to facilitate the research of speech representation disentanglement.
+一个基于3D-Speaker模型的声纹识别应用，支持声纹注册、识别和管理功能，数据存储在MySQL数据库中。
 
-## Benchmark
-The EER results on VoxCeleb, CNCeleb and 3D-Speaker datasets for fully-supervised speaker verification.
-| Model | Params | VoxCeleb1-O | CNCeleb | 3D-Speaker |
-|:-----:|:------:| :------:|:------:|:------:|
-| Res2Net | 4.03 M | 1.56% | 7.96% | 8.03% |
-| ResNet34 | 6.34 M | 1.05% | 6.92% | 7.29% |
-| ECAPA-TDNN | 20.8 M | 0.86% | 8.01% | 8.87% |
-| ERes2Net-base | 6.61 M | 0.84% | 6.69% | 7.21% |
-| CAM++ | 7.2 M | 0.65% | 6.78% | 7.75% |
-| ERes2NetV2 | 17.8M | 0.61% | **6.14%** | 6.52% |
-| ERes2Net-large | 22.46 M | **0.52%** | 6.17% | **6.34%** |
+## 功能特点
 
-The DER results on public and internal multi-speaker datasets for speaker diarization.
-| Test | 3D-Speaker | [pyannote.audio](https://github.com/pyannote/pyannote-audio) | [DiariZen_WavLM](https://github.com/BUTSpeechFIT/DiariZen) | 
-|:-----:|:------:|:------:|:------:|
-|[Aishell-4](https://arxiv.org/abs/2104.03603)|**10.30%**|12.2%|11.7%|
-|[Alimeeting](https://www.openslr.org/119/)|19.73%|24.4%|**17.6%**|
-|[AMI_SDM](https://groups.inf.ed.ac.uk/ami/corpus/)|21.76%|22.4%|**15.4%**|
-|[VoxConverse](https://github.com/joonson/voxconverse)|11.75%|**11.3%**|28.39%|
-|Meeting-CN_ZH-1|**18.91%**|22.37%|32.66%|
-|Meeting-CN_ZH-2|**12.78%**|17.86%|18%|
+- 声纹注册：支持录制或上传音频文件注册用户声纹
+- 声纹识别：根据音频识别用户身份
+- 分组管理：支持多分组声纹注册和识别，不同分组下可有相同ID的用户
+- 用户管理：查看和删除注册用户
+- REST API支持：提供HTTP接口，便于集成到其他系统
 
+## 快速开始
 
-## Quickstart
-### Install 3D-Speaker
-``` sh
-git clone https://github.com/modelscope/3D-Speaker.git && cd 3D-Speaker
-conda create -n 3D-Speaker python=3.8
-conda activate 3D-Speaker
-pip install -r requirements.txt
-```
-### Running experiments
-``` sh
-# Speaker verification: ERes2NetV2 on 3D-Speaker dataset
-cd egs/3dspeaker/sv-eres2netv2/
-bash run.sh
-# Speaker verification: CAM++ on 3D-Speaker dataset
-cd egs/3dspeaker/sv-cam++/
-bash run.sh
-# Speaker verification: ECAPA-TDNN on 3D-Speaker dataset
-cd egs/3dspeaker/sv-ecapa/
-bash run.sh
-# Self-supervised speaker verification: SDPN on VoxCeleb dataset
-cd egs/voxceleb/sv-sdpn/
-bash run.sh
-# Audio and multimodal Speaker diarization:
-cd egs/3dspeaker/speaker-diarization/
-bash run_audio.sh
-bash run_video.sh
-# Language identification
-cd egs/3dspeaker/language-idenitfication
-bash run.sh
-```
-### Inference using pretrained models from Modelscope
-All pretrained models are released on [Modelscope](https://www.modelscope.cn/models?page=1&tasks=speaker-verification&type=audio).
+### 使用Docker运行
 
-``` sh
-# Install modelscope
-pip install modelscope
-# ERes2Net trained on 200k labeled speakers
-model_id=iic/speech_eres2net_sv_zh-cn_16k-common
-# ERes2NetV2 trained on 200k labeled speakers
-model_id=iic/speech_eres2netv2_sv_zh-cn_16k-common
-# CAM++ trained on 200k labeled speakers
-model_id=iic/speech_campplus_sv_zh-cn_16k-common
-# Run CAM++ or ERes2Net inference
-python speakerlab/bin/infer_sv.py --model_id $model_id
-# Run batch inference
-python speakerlab/bin/infer_sv_batch.py --model_id $model_id --wavs $wav_list
-
-# SDPN trained on VoxCeleb
-model_id=iic/speech_sdpn_ecapa_tdnn_sv_en_voxceleb_16k
-# Run SDPN inference
-python speakerlab/bin/infer_sv_ssl.py --model_id $model_id
-
-# Run diarization inference
-python speakerlab/bin/infer_diarization.py --wav [wav_list OR wav_path] --out_dir $out_dir
-# Enable overlap detection
-python speakerlab/bin/infer_diarization.py --wav [wav_list OR wav_path] --out_dir $out_dir --include_overlap --hf_access_token $hf_access_token
+```bash
+docker-compose up -d
 ```
 
-## Overview of Content
+访问 http://localhost:7860 打开声纹识别系统界面。
 
-- **Supervised Speaker Verification**
-  - [CAM++](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-cam%2B%2B), [ERes2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-eres2net), [ERes2NetV2](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-eres2netv2), [ECAPA-TDNN](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-ecapa), [ResNet](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-resnet) and [Res2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-res2net) training recipes on [3D-Speaker](https://3dspeaker.github.io/).
+## 表结构
 
-  - [CAM++](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-cam%2B%2B), [ERes2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-eres2net), [ERes2NetV2](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-eres2netv2), [ECAPA-TDNN](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-ecapa), [ResNet](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-resnet) and [Res2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-res2net) training recipes on [VoxCeleb](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/). 
+系统使用MySQL数据库存储用户和声纹信息，表结构如下：
 
-  - [CAM++](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-cam%2B%2B), [ERes2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-eres2net), [ERes2NetV2](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-eres2netv2), [ECAPA-TDNN](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-ecapa), [ResNet](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-resnet) and [Res2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-res2net) training recipes on [CN-Celeb](http://cnceleb.org/).
+```sql
+CREATE TABLE IF NOT EXISTS voice_auth_users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    group_name VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    user_name VARCHAR(255),
+    sample_id VARCHAR(255) NOT NULL,
+    embedding_path VARCHAR(512) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_group_user_sample (group_name, user_id, sample_id),
+    INDEX idx_group_user (group_name, user_id)
+);
+```
 
-- **Self-supervised Speaker Verification**
-  - [RDINO](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-rdino) and [SDPN](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-sdpn) training recipes on [VoxCeleb](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/)
-    
-  - [RDINO](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-rdino) training recipes on [3D-Speaker](https://3dspeaker.github.io/).
+## API 接口说明
 
-  - [RDINO](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-rdino) training recipes on [CN-Celeb](http://cnceleb.org/).
+系统提供以下HTTP API接口：
 
-- **Speaker Diarization**
-  - [Speaker diarization](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/speaker-diarization) inference recipes which comprise multiple modules, including overlap detection[optional], voice activity detection, speech segmentation, speaker embedding extraction, and speaker clustering. 
+### 1. 用户注册
 
-- **Language Identification**
-  - [Language identification](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/language-identification) training recipes on [3D-Speaker](https://3dspeaker.github.io/).
+**URL**: `/direct/register_user`
+**方法**: POST
+**Content-Type**: multipart/form-data
 
-- **3D-Speaker Dataset**
-  - Dataset introduction and download address: [3D-Speaker](https://3dspeaker.github.io/) <br>
-  - Related paper address: [3D-Speaker](https://arxiv.org/pdf/2306.15354.pdf)
+**参数**:
+- `data`: 音频文件 (必填)
+- `user_id`: 用户ID (必填)
+- `user_name`: 用户名称 (选填)
+- `group_name`: 分组名称 (选填，默认为"default")
 
-
-## What‘s new :fire:
-- [2024.12] Update [diarization](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/speaker-diarization) recipes and add results on multiple diarization benchmarks.
-- [2024.8] Releasing [ERes2NetV2](https://modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common) and [ERes2NetV2_w24s4ep4](https://modelscope.cn/models/iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common) pretrained models trained on 200k-speaker datasets.
-- [2024.5] Releasing [SDPN](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-sdpn) model and [X-vector](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-xvector) model training and inference recipes for VoxCeleb.
-- [2024.5] Releasing [visual module](https://github.com/modelscope/3D-Speaker/tree/main/egs/ava-asd/talknet) and [semantic module](https://github.com/modelscope/3D-Speaker/tree/main/egs/semantic_speaker/bert) training recipes.
-- [2024.4] Releasing [ONNX Runtime](https://github.com/modelscope/3D-Speaker/tree/main/runtime/onnxruntime) and the relevant scripts for inference.
-- [2024.4] Releasing [ERes2NetV2](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-eres2netv2) model with lower parameters and faster inference speed on VoxCeleb datasets.
-- [2024.2] Releasing [language identification](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/language-identification) integrating phonetic information recipes for more higher recognition accuracy.
-- [2024.2] Releasing [multimodal diarization](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/speaker-diarization) recipes which fuses audio and video image input to produce more accurate results.
-- [2024.1] Releasing [ResNet34](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-resnet) and [Res2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-res2net) model training and inference recipes for 3D-Speaker, VoxCeleb and CN-Celeb datasets.
-- [2024.1] Releasing [large-margin finetune recipes](https://github.com/modelscope/3D-Speaker/blob/main/egs/voxceleb/sv-eres2net/run.sh) in speaker verification and adding [diarization recipes](https://github.com/modelscope/3D-Speaker/blob/main/egs/3dspeaker/speaker-diarization/run.sh). 
-- [2023.11] [ERes2Net-base](https://modelscope.cn/models/damo/speech_eres2net_base_200k_sv_zh-cn_16k-common/summary) pretrained model released, trained on a Mandarin dataset of 200k labeled speakers.
-- [2023.10] Releasing [ECAPA model](https://github.com/modelscope/3D-Speaker/tree/main/egs/voxceleb/sv-ecapa) training and inference recipes for three datasets.
-- [2023.9] Releasing [RDINO](https://github.com/modelscope/3D-Speaker/tree/main/egs/cnceleb/sv-rdino) model training and inference recipes for [CN-Celeb](http://cnceleb.org/).
-- [2023.8] Releasing [CAM++](https://modelscope.cn/models/damo/speech_campplus_sv_cn_cnceleb_16k/summary), [ERes2Net-Base](https://modelscope.cn/models/damo/speech_eres2net_base_sv_zh-cn_cnceleb_16k/summary) and [ERes2Net-Large](https://modelscope.cn/models/damo/speech_eres2net_large_sv_zh-cn_cnceleb_16k/summary) benchmarks in [CN-Celeb](http://cnceleb.org/).
-- [2023.8] Releasing [ERes2Net](https://modelscope.cn/models/damo/speech_eres2net_base_lre_en-cn_16k/summary) annd [CAM++](https://modelscope.cn/models/damo/speech_campplus_lre_en-cn_16k/summary) in language identification for Mandarin and English. 
-- [2023.7] Releasing [CAM++](https://modelscope.cn/models/damo/speech_campplus_sv_zh-cn_3dspeaker_16k/summary), [ERes2Net-Base](https://modelscope.cn/models/damo/speech_eres2net_base_sv_zh-cn_3dspeaker_16k/summary), [ERes2Net-Large](https://modelscope.cn/models/damo/speech_eres2net_large_sv_zh-cn_3dspeaker_16k/summary) pretrained models trained on [3D-Speaker](https://3dspeaker.github.io/).
-- [2023.7] Releasing [Dialogue Detection](https://modelscope.cn/models/damo/speech_bert_dialogue-detetction_speaker-diarization_chinese/summary) and [Semantic Speaker Change Detection](https://modelscope.cn/models/damo/speech_bert_semantic-spk-turn-detection-punc_speaker-diarization_chinese/summary) in speaker diarization.
-- [2023.7] Releasing [CAM++](https://modelscope.cn/models/damo/speech_campplus_lre_en-cn_16k/summary) in language identification for Mandarin and English.
-- [2023.6] Releasing [3D-Speaker](https://3dspeaker.github.io/) dataset and its corresponding benchmarks including [ERes2Net](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-eres2net), [CAM++](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-cam%2B%2B) and [RDINO](https://github.com/modelscope/3D-Speaker/tree/main/egs/3dspeaker/sv-rdino).
-- [2023.5] [ERes2Net](https://modelscope.cn/models/damo/speech_eres2net_sv_zh-cn_16k-common/summary) and [CAM++](https://www.modelscope.cn/models/damo/speech_campplus_sv_zh-cn_16k-common/summary) pretrained model released, trained on a Mandarin dataset of 200k labeled speakers.
-
-## Contact
-If you have any comment or question about 3D-Speaker, please contact us by
-- email: {yfchen97, wanghuii}@mail.ustc.edu.cn, {dengchong.d, zsq174630, shuli.cly}@alibaba-inc.com
-
-## License
-3D-Speaker is released under the [Apache License 2.0](LICENSE).
-
-## Acknowledge
-3D-Speaker contains third-party components and code modified from some open-source repos, including: <br>
-[Speechbrain](https://github.com/speechbrain/speechbrain), [Wespeaker](https://github.com/wenet-e2e/wespeaker), [D-TDNN](https://github.com/yuyq96/D-TDNN), [DINO](https://github.com/facebookresearch/dino), [Vicreg](https://github.com/facebookresearch/vicreg), [TalkNet-ASD
-](https://github.com/TaoRuijie/TalkNet-ASD), [Ultra-Light-Fast-Generic-Face-Detector-1MB](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB), [pyannote.audio](https://github.com/pyannote/pyannote-audio)
-
-
-## Citations
-If you find this repository useful, please consider giving a star :star: and citation :t-rex::
-```BibTeX
-@article{chen20243d,
-  title={3D-Speaker-Toolkit: An Open Source Toolkit for Multi-modal Speaker Verification and Diarization},
-  author={Chen, Yafeng and Zheng, Siqi and Wang, Hui and Cheng, Luyao and others},
-  booktitle={ICASSP},
-  year={2025}
+**返回示例**:
+```json
+{
+  "success": true,
+  "message": "成功注册用户 张三(ID: 001, 组: default)，声纹样本 #1"
 }
 ```
+
+### 2. 用户识别
+
+**URL**: `/direct/identify_user`
+**方法**: POST
+**Content-Type**: multipart/form-data
+
+**参数**:
+- `data`: 音频文件 (必填)
+- `threshold`: 匹配阈值，范围0.5-0.95 (选填，默认0.7)
+- `group_name`: 分组名称 (选填，默认为"default")
+
+**返回示例**:
+```json
+{
+  "success": true,
+  "message": "✅ 匹配成功! 用户: 张三 (ID: 001, 组: default)\n相似度分数: 0.8523"
+}
+```
+
+### 3. 列出用户
+
+**URL**: `/direct/list_users`
+**方法**: POST
+**Content-Type**: multipart/form-data
+
+**参数**:
+- `group_name`: 分组名称 (选填，默认为"default")
+
+**返回示例**:
+```json
+{
+  "success": true,
+  "message": "分组 'default' 已注册用户列表:\n- 张三 (ID: 001), 样本数: 2\n- 李四 (ID: 002), 样本数: 1"
+}
+```
+
+### 4. 删除用户
+
+**URL**: `/direct/delete_user`
+**方法**: POST
+**Content-Type**: multipart/form-data
+
+**参数**:
+- `user_id`: 用户ID (必填)
+- `group_name`: 分组名称 (选填，默认为"default")
+
+**返回示例**:
+```json
+{
+  "success": true,
+  "message": "已删除用户 张三 (ID: 001, 组: default) 及其所有声纹样本"
+}
+```
+
+## Java客户端调用示例
+
+```java
+import java.io.File;
+import java.io.IOException;
+
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+
+public class VoiceAuthClient {
+    private static final String BASE_URL = "http://localhost:7860";
+    private static final OkHttpClient client = new OkHttpClient();
+
+    // 注册用户
+    public static String registerUser(File audioFile, String userId, String userName, String groupName) throws IOException {
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("data", audioFile.getName(),
+                        RequestBody.create(MediaType.parse("audio/wav"), audioFile))
+                .addFormDataPart("user_id", userId)
+                .addFormDataPart("user_name", userName)
+                .addFormDataPart("group_name", groupName)
+                .build();
+
+        Request request = new Request.Builder()
+                .url(BASE_URL + "/direct/register_user")
+                .post(requestBody)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            return response.body().string();
+        }
+    }
+
+    // 识别用户
+    public static String identifyUser(File audioFile, double threshold, String groupName) throws IOException {
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("data", audioFile.getName(),
+                        RequestBody.create(MediaType.parse("audio/wav"), audioFile))
+                .addFormDataPart("threshold", String.valueOf(threshold))
+                .addFormDataPart("group_name", groupName)
+                .build();
+
+        Request request = new Request.Builder()
+                .url(BASE_URL + "/direct/identify_user")
+                .post(requestBody)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            return response.body().string();
+        }
+    }
+
+    // 列出用户
+    public static String listUsers(String groupName) throws IOException {
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("group_name", groupName)
+                .build();
+
+        Request request = new Request.Builder()
+                .url(BASE_URL + "/direct/list_users")
+                .post(requestBody)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            return response.body().string();
+        }
+    }
+
+    // 删除用户
+    public static String deleteUser(String userId, String groupName) throws IOException {
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("user_id", userId)
+                .addFormDataPart("group_name", groupName)
+                .build();
+
+        Request request = new Request.Builder()
+                .url(BASE_URL + "/direct/delete_user")
+                .post(requestBody)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            return response.body().string();
+        }
+    }
+
+    // 使用示例
+    public static void main(String[] args) {
+        try {
+            // 注册用户
+            File audioFile = new File("path/to/audio.wav");
+            System.out.println(registerUser(audioFile, "001", "张三", "default"));
+            
+            // 列出用户
+            System.out.println(listUsers("default"));
+            
+            // 识别用户
+            System.out.println(identifyUser(audioFile, 0.7, "default"));
+            
+            // 删除用户
+            System.out.println(deleteUser("001", "default"));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+## 技术栈
+
+- **后端**: Python, FastAPI, Gradio
+- **数据库**: MySQL
+- **模型**: 3D-Speaker ERes2NetV2 声纹识别模型
+- **容器化**: Docker
+
+## 参考
+本项目使用了3D-Speaker开源工具包中的模型和部分代码。详情请参考: 
+[3D-Speaker GitHub](https://github.com/modelscope/3D-Speaker)
+
+## 授权协议
+Apache License 2.0

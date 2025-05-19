@@ -44,3 +44,7 @@ Makefile
 **/onnx_runtime/
 **/exp/
 **/__pycache__/
+pretrained/speech_eres2netv2_sv_zh-cn_16k-common/examples
+pretrained/speech_eres2netv2_sv_zh-cn_16k-common/pretrained_eres2netv2.ckpt
+pretrained/speech_eres2netv2_sv_zh-cn_16k-common/embeddings/speaker1_a_cn_16k.npy
+pretrained/speech_eres2netv2_sv_zh-cn_16k-common/embeddings/speaker1_b_cn_16k.npy
