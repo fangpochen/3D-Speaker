@@ -27,6 +27,7 @@ import io
 class ApiResponse(BaseModel):
     success: bool
     message: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 # 请求模型定义
@@ -259,14 +260,24 @@ def register_user(audio, user_id, user_name, group_name="default"):
 # 识别用户
 def identify_user(audio, threshold=0.70, group_name="default"):
     if not audio:
-        return "请提供音频文件"
+        return {
+            "success": False,
+            "message": "请提供音频文件",
+            "data": None,
+            "error": "缺少音频文件"
+        }
     
     group_name = group_name.strip() if group_name else "default"
     
     # 提取声纹
     current_embedding = extract_embedding(audio)
     if current_embedding is None:
-        return "音频处理失败，请检查格式"
+        return {
+            "success": False,
+            "message": "音频处理失败，请检查格式",
+            "data": None,
+            "error": "音频处理失败"
+        }
     
     try:
         conn = connection_pool.get_connection()
@@ -279,7 +290,12 @@ def identify_user(audio, threshold=0.70, group_name="default"):
         )
         result = cursor.fetchone()
         if result['count'] == 0:
-            return f"分组 '{group_name}' 下没有注册用户，请先注册"
+            return {
+                "success": False,
+                "message": f"分组 '{group_name}' 下没有注册用户，请先注册",
+                "data": None,
+                "error": "分组无用户"
+            }
         
         # 获取该组下所有用户的声纹样本
         cursor.execute(
@@ -291,9 +307,8 @@ def identify_user(audio, threshold=0.70, group_name="default"):
             (group_name,)
         )
         
-        max_score = 0
-        matched_user = None
-        matched_sample = None
+        max_score = 0.0
+        matched_user_info = None
         
         # 计算与所有样本的相似度
         for record in cursor.fetchall():
@@ -308,21 +323,46 @@ def identify_user(audio, threshold=0.70, group_name="default"):
                     print(f"用户: {record['user_id']}, 样本: {record['sample_id']}, 相似度: {score:.4f}")
                     if score > max_score:
                         max_score = score
-                        matched_user = record
+                        matched_user_info = record
                 except Exception as e:
-                    print(f"加载文件 {embedding_path} 出错: {e}")
+                    print(f"加载文件 {embedding_path} 或计算相似度出错: {e}")
             else:
                 print(f"声纹文件不存在: {embedding_path}")
         
         # 返回结果
-        if max_score >= threshold and matched_user:
-            return f"✅ 匹配成功! 用户: {matched_user['user_name']} (ID: {matched_user['user_id']}, 组: {group_name})\n相似度分数: {max_score:.4f}"
+        if max_score >= threshold and matched_user_info:
+            user_data = {
+                "user_id": matched_user_info['user_id'],
+                "user_name": matched_user_info['user_name'],
+                "group_name": group_name,
+                "score": float(f"{max_score:.4f}"),
+                "threshold": float(threshold)
+            }
+            return {
+                "success": True,
+                "message": f"✅ 匹配成功! 用户: {matched_user_info['user_name']} (ID: {matched_user_info['user_id']}, 组: {group_name})\n相似度分数: {max_score:.4f}",
+                "data": user_data,
+                "error": None
+            }
         else:
-            return f"❌ 未匹配到任何用户\n最高相似度分数: {max_score:.4f} (阈值: {threshold})"
+            return {
+                "success": False,
+                "message": f"❌ 未匹配到任何用户\n最高相似度分数: {max_score:.4f} (阈值: {threshold})",
+                "data": {
+                    "threshold": float(threshold),
+                    "max_score": float(f"{max_score:.4f}")
+                },
+                "error": "未达到匹配阈值或无匹配用户"
+            }
     
     except Exception as e:
         print(f"识别用户时发生错误: {e}")
-        return f"识别失败: {str(e)}"
+        return {
+            "success": False,
+            "message": "识别过程中发生内部错误",
+            "data": None,
+            "error": str(e)
+        }
     finally:
         if 'cursor' in locals():
             cursor.close()
@@ -483,6 +523,8 @@ def add_custom_routes(fastapi_app):
         threshold: float = Form(0.7, description="匹配阈值，范围0.5-0.95，越高要求越严格"),
         group_name: str = Form("default", description="分组名称，选填，默认为'default'")
     ):
+        temp_audio_path = None
+        temp_dir = None
         try:
             # 保存上传的文件到临时目录
             temp_dir = tempfile.mkdtemp()
@@ -492,16 +534,17 @@ def add_custom_routes(fastapi_app):
                 f.write(await data.read())
             
             # 调用识别函数
-            result = identify_user(str(temp_audio_path), threshold, group_name)
-            
-            # 清理临时文件
-            os.remove(temp_audio_path)
-            os.rmdir(temp_dir)
+            result_dict = identify_user(str(temp_audio_path), threshold, group_name)
             
             # 返回结果
-            return ApiResponse(success=True, message=result)
+            return ApiResponse(**result_dict)
         except Exception as e:
-            return ApiResponse(success=False, error=str(e))
+            return ApiResponse(success=False, message="处理请求时发生内部错误", error=str(e), data=None)
+        finally:
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+            if temp_dir and os.path.exists(temp_dir):
+                os.rmdir(temp_dir)
     
     @fastapi_app.post("/direct/list_users",
                      summary="列出已注册用户",
@@ -560,21 +603,27 @@ def add_custom_routes(fastapi_app):
                      description="通过URL识别声纹，与数据库中已注册的声纹进行匹配",
                      response_model=ApiResponse)
     async def api_identify_user(request: IdentifyUserRequest):
+        temp_audio_path = None
+        temp_dir = None
         try:
             # 下载音频文件
             temp_audio_path, temp_dir = await download_audio_from_url(request.data)
             
             # 调用识别函数
-            result = identify_user(temp_audio_path, request.threshold, request.group_name)
-            
-            # 清理临时文件
-            os.remove(temp_audio_path)
-            os.rmdir(temp_dir)
+            result_dict = identify_user(temp_audio_path, request.threshold, request.group_name)
             
             # 返回结果
-            return ApiResponse(success=True, message=result)
+            return ApiResponse(**result_dict)
         except Exception as e:
-            return ApiResponse(success=False, error=str(e))
+            # 区分下载错误和识别错误
+            if "下载音频文件失败" in str(e):
+                 return ApiResponse(success=False, message=str(e), error="音频下载失败", data=None)
+            return ApiResponse(success=False, message="处理请求时发生内部错误", error=str(e), data=None)
+        finally:
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+            if temp_dir and os.path.exists(temp_dir):
+                os.rmdir(temp_dir)
     
     @fastapi_app.post("/api/list_users",
                      summary="列出已注册用户(JSON格式)",
@@ -643,7 +692,13 @@ with gr.Blocks(title="声纹识别系统") as app:
         return list_users("default")
     
     app.load(on_app_load, inputs=None, outputs=users_list)
-    ident_btn.click(identify_user, inputs=[ident_audio, threshold, ident_group], outputs=ident_output)
+
+    # 修改Gradio界面identify_btn的click事件，以处理新的返回格式
+    def gradio_identify_wrapper(audio, threshold, group_name):
+        result = identify_user(audio, threshold, group_name)
+        return result.get("message", "处理出错")
+
+    ident_btn.click(gradio_identify_wrapper, inputs=[ident_audio, threshold, ident_group], outputs=ident_output)
     del_btn.click(delete_user, inputs=[del_user_id, del_group], outputs=del_output)
 
 # 启动应用

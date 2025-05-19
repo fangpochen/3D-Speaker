@@ -56,12 +56,7 @@ RUN mkdir -p /app/modelscope_hub_cache /app/voice_auth_db/embeddings
 ENV PYTHONUNBUFFERED=1
 ENV MODELSCOPE_CACHE=/app/modelscope_hub_cache
 
-# 设置程序运行时的代理环境变量
-# 使用Docker网桥IP，而不是host.docker.internal
-ENV http_proxy=http://172.17.0.1:7890
-ENV https_proxy=http://172.17.0.1:7890
-ENV HTTP_PROXY=http://172.17.0.1:7890
-ENV HTTPS_PROXY=http://172.17.0.1:7890
+# 不在镜像中硬编码代理地址，而是在运行时通过docker-compose.yml提供
 # 添加no_proxy设置，避免内部通信也走代理
 ENV no_proxy=localhost,127.0.0.1
 ENV NO_PROXY=localhost,127.0.0.1
