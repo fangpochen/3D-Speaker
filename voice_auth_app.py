@@ -39,7 +39,7 @@ class RegisterUserRequest(BaseModel):
 
 class IdentifyUserRequest(BaseModel):
     data: str  # URL to audio file
-    threshold: Optional[float] = 0.7
+    threshold: Optional[float] = 0.7  # 保留兼容性，实际不使用
     group_name: Optional[str] = "default"
 
 class ListUsersRequest(BaseModel):
@@ -122,27 +122,29 @@ init_database()
 
 # 加载模型
 def load_model():
-    # 模型文件在Docker镜像内的预期路径
-    # Dockerfile中我们将 ./modelscope_hub_cache 复制到了 /app/modelscope_hub_cache
-    # snapshot_download 会在 cache_dir 下创建以 MODEL_ID 为名的子目录
-    docker_model_root = "/app/modelscope_hub_cache"
-    # cache_dir 现在指向我们复制到镜像中的模型目录的父目录
-    # MODEL_ID 本身包含路径分隔符，os.path.join会正确处理
-    cache_dir_in_image = os.path.join(docker_model_root, MODEL_ID)
-
     model_checkpoint_filename = 'pretrained_eres2netv2.ckpt'
-    model_path = os.path.join(cache_dir_in_image, model_checkpoint_filename)
-
-    print(f"尝试从本地路径加载模型: {model_path}")
+    
+    # 根据运行环境选择模型路径
+    if os.path.exists("/app"):
+        # Docker环境
+        docker_model_root = "/app/modelscope_hub_cache"
+        cache_dir_in_image = os.path.join(docker_model_root, MODEL_ID)
+        model_path = os.path.join(cache_dir_in_image, model_checkpoint_filename)
+        print(f"Docker环境: 尝试从路径加载模型: {model_path}")
+    else:
+        # 本地开发环境
+        local_model_root = "./modelscope_hub_cache"
+        cache_dir_local = os.path.join(local_model_root, MODEL_ID)
+        model_path = os.path.join(cache_dir_local, model_checkpoint_filename)
+        print(f"本地环境: 尝试从路径加载模型: {model_path}")
 
     if not os.path.exists(model_path):
         error_msg = (
-            f"错误: 模型文件在预期的本地路径未找到: {model_path}\n"
+            f"错误: 模型文件未找到: {model_path}\n"
             f"请确认以下事项:\n"
-            f"1. 已在本地运行 download_model.py 脚本，并将模型下载到项目根目录下的 'modelscope_hub_cache' 文件夹中。\n"
-            f"2. Dockerfile 正确地将 './modelscope_hub_cache' 复制到了镜像中的 '/app/modelscope_hub_cache'。\n"
-            f"3. 模型ID '{MODEL_ID}' 和版本 'v1.0.1' (用于下载) 是正确的。\n"
-            f"4. 检点文件名 '{model_checkpoint_filename}' 是正确的。"
+            f"1. 已运行 download_model.py 脚本下载模型到 'modelscope_hub_cache' 文件夹中。\n"
+            f"2. 模型ID '{MODEL_ID}' 是正确的。\n"
+            f"3. 检查点文件名 '{model_checkpoint_filename}' 是正确的。"
         )
         print(error_msg)
         raise FileNotFoundError(error_msg)
@@ -307,12 +309,17 @@ def identify_user(audio, threshold=0.70, group_name="default"):
             (group_name,)
         )
         
-        max_score = 0.0
+        max_score = -1.0  # 初始化为-1，确保能找到最大值
         matched_user_info = None
         
         # 计算与所有样本的相似度
         for record in cursor.fetchall():
             embedding_path = record['embedding_path']
+            
+            # 处理路径：如果是相对路径，转换为绝对路径
+            if not os.path.isabs(embedding_path):
+                embedding_path = os.path.join(os.getcwd(), embedding_path)
+            
             print(f"尝试加载声纹文件: {embedding_path}")
             
             # 检查文件是否存在
@@ -329,30 +336,30 @@ def identify_user(audio, threshold=0.70, group_name="default"):
             else:
                 print(f"声纹文件不存在: {embedding_path}")
         
-        # 返回结果
-        if max_score >= threshold and matched_user_info:
+        # 返回结果 - 直接返回最相似的用户，不使用阈值判断
+        if matched_user_info:
             user_data = {
                 "user_id": matched_user_info['user_id'],
                 "user_name": matched_user_info['user_name'],
                 "group_name": group_name,
                 "score": float(f"{max_score:.4f}"),
-                "threshold": float(threshold)
+                "threshold": float(threshold)  # 保留threshold字段以保持API兼容性
             }
             return {
                 "success": True,
-                "message": f"✅ 匹配成功! 用户: {matched_user_info['user_name']} (ID: {matched_user_info['user_id']}, 组: {group_name})\n相似度分数: {max_score:.4f}",
+                "message": f"✅ 识别完成! 最相似用户: {matched_user_info['user_name']} (ID: {matched_user_info['user_id']}, 组: {group_name})\n相似度分数: {max_score:.4f}",
                 "data": user_data,
                 "error": None
             }
         else:
             return {
                 "success": False,
-                "message": f"❌ 未匹配到任何用户\n最高相似度分数: {max_score:.4f} (阈值: {threshold})",
+                "message": f"❌ 无法识别用户，可能所有声纹文件都无法加载",
                 "data": {
                     "threshold": float(threshold),
                     "max_score": float(f"{max_score:.4f}")
                 },
-                "error": "未达到匹配阈值或无匹配用户"
+                "error": "无有效声纹文件"
             }
     
     except Exception as e:
@@ -516,11 +523,11 @@ def add_custom_routes(fastapi_app):
     
     @fastapi_app.post("/direct/identify_user",
                      summary="识别用户声纹",
-                     description="上传音频文件，与数据库中已注册的声纹进行匹配",
+                     description="上传音频文件，返回最相似的已注册用户（不使用阈值判断）",
                      response_model=ApiResponse)
     async def direct_identify_user(
         data: UploadFile = File(..., description="音频文件，支持各种常见音频格式"),
-        threshold: float = Form(0.7, description="匹配阈值，范围0.5-0.95，越高要求越严格"),
+        threshold: float = Form(0.7, description="阈值参数（保留兼容性，实际不使用）"),
         group_name: str = Form("default", description="分组名称，选填，默认为'default'")
     ):
         temp_audio_path = None
@@ -600,7 +607,7 @@ def add_custom_routes(fastapi_app):
     
     @fastapi_app.post("/api/identify_user",
                      summary="识别用户声纹(JSON格式)",
-                     description="通过URL识别声纹，与数据库中已注册的声纹进行匹配",
+                     description="通过URL识别声纹，返回最相似的已注册用户（不使用阈值判断）",
                      response_model=ApiResponse)
     async def api_identify_user(request: IdentifyUserRequest):
         temp_audio_path = None
@@ -670,7 +677,7 @@ with gr.Blocks(title="声纹识别系统") as app:
             with gr.Column():
                 ident_audio = gr.Audio(type="filepath", label="录制或上传声音")
                 ident_group = gr.Textbox(label="分组名称", placeholder="默认为default", value="default")
-                threshold = gr.Slider(0.5, 0.95, value=0.7, step=0.01, label="匹配阈值", info="越高要求越严格 (推荐: 0.7)")
+                threshold = gr.Slider(0.5, 0.95, value=0.7, step=0.01, label="阈值（仅显示）", info="当前版本直接返回最相似用户，不使用阈值判断")
                 ident_btn = gr.Button("识别声纹", variant="primary")
             with gr.Column():
                 ident_output = gr.Textbox(label="识别结果", lines=5)

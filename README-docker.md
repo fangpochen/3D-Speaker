@@ -110,3 +110,4 @@ mysql -h 106.13.0.50 -u root -p -P 3306
 ```bash
 chmod -R 777 ./voice_auth_db
 ``` 
+ docker build   --build-arg http_proxy=http://172.17.0.1:7890   --build-arg https_proxy=http://172.17.0.1:7890   --build-arg HTTP_PROXY=http://172.17.0.1:7890   --build-arg HTTPS_PROXY=http://172.17.0.1:7890   -t voice-auth-app .
