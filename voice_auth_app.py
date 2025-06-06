@@ -15,13 +15,16 @@ from speakerlab.utils.builder import dynamic_import
 import tempfile
 import fastapi
 from fastapi import UploadFile, File, Form
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, FileResponse
 import mysql.connector
 from mysql.connector import pooling
 from typing import Optional, Dict, Any, List, Union
 from pydantic import BaseModel, HttpUrl
 import requests
 import io
+import edge_tts
+import asyncio
+import uuid
 
 # 响应模型定义
 class ApiResponse(BaseModel):
@@ -48,6 +51,32 @@ class ListUsersRequest(BaseModel):
 class DeleteUserRequest(BaseModel):
     user_id: str
     group_name: Optional[str] = "default"
+
+# 组管理请求模型
+class CreateGroupRequest(BaseModel):
+    group_name: str
+    description: Optional[str] = None
+
+class DeleteGroupRequest(BaseModel):
+    group_name: str
+    force: Optional[bool] = False  # 是否强制删除（即使组内有用户）
+
+class ListGroupsRequest(BaseModel):
+    pass  # 无需参数
+
+class GroupInfoRequest(BaseModel):
+    group_name: str
+
+# TTS请求模型
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "zh-CN-XiaoyiNeural"  # 默认使用中文女声
+    rate: Optional[str] = "+0%"  # 语速调节
+    volume: Optional[str] = "+0%"  # 音量调节
+    pitch: Optional[str] = "+0Hz"  # 音调调节
+
+class TTSVoicesRequest(BaseModel):
+    language: Optional[str] = None  # 可选语言过滤
 
 # 配置信息
 MODEL_ID = 'iic/speech_eres2netv2_sv_zh-cn_16k-common'
@@ -81,10 +110,12 @@ connection_pool = pooling.MySQLConnectionPool(
 # 数据库路径（保留用于存储声纹文件）
 DB_DIR = Path("/app/voice_auth_db") if os.path.exists("/app") else Path("voice_auth_db")
 EMBEDDINGS_DIR = DB_DIR / "embeddings"
+TTS_AUDIO_DIR = DB_DIR / "tts_audio"  # TTS生成的音频文件存储目录
 
 # 创建目录
 DB_DIR.mkdir(exist_ok=True)
 EMBEDDINGS_DIR.mkdir(exist_ok=True)
+TTS_AUDIO_DIR.mkdir(exist_ok=True)
 
 # 初始化数据库表
 def init_database():
@@ -105,6 +136,23 @@ def init_database():
             UNIQUE KEY uniq_group_user_sample (group_name, user_id, sample_id),
             INDEX idx_group_user (group_name, user_id)
         )
+        ''')
+        
+        # 创建组信息表
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS voice_auth_groups (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            group_name VARCHAR(255) NOT NULL UNIQUE,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_group_name (group_name)
+        )
+        ''')
+        
+        # 插入默认组（如果不存在）
+        cursor.execute('''
+        INSERT IGNORE INTO voice_auth_groups (group_name, description) 
+        VALUES ('default', '默认分组')
         ''')
         
         conn.commit()
@@ -218,6 +266,15 @@ def register_user(audio, user_id, user_name, group_name="default"):
     try:
         conn = connection_pool.get_connection()
         cursor = conn.cursor()
+        
+        # 检查分组是否存在，如果不存在则自动创建
+        cursor.execute("SELECT COUNT(*) FROM voice_auth_groups WHERE group_name = %s", (group_name,))
+        if cursor.fetchone()[0] == 0:
+            cursor.execute(
+                "INSERT INTO voice_auth_groups (group_name, description) VALUES (%s, %s)",
+                (group_name, f"自动创建的分组 {group_name}")
+            )
+            print(f"自动创建分组: {group_name}")
         
         # 查询用户在该组下的样本数
         cursor.execute(
@@ -469,6 +526,233 @@ def delete_user(user_id, group_name="default"):
         if 'conn' in locals():
             conn.close()
 
+# 组管理函数
+def create_group(group_name, description=None):
+    """创建新的分组"""
+    if not group_name:
+        return {"success": False, "message": "请提供分组名称", "error": "缺少分组名称"}
+    
+    group_name = group_name.strip()
+    if not group_name:
+        return {"success": False, "message": "分组名称不能为空", "error": "分组名称无效"}
+    
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 检查分组是否已存在
+        cursor.execute("SELECT COUNT(*) FROM voice_auth_groups WHERE group_name = %s", (group_name,))
+        if cursor.fetchone()[0] > 0:
+            return {"success": False, "message": f"分组 '{group_name}' 已存在", "error": "分组已存在"}
+        
+        # 创建新分组
+        cursor.execute(
+            "INSERT INTO voice_auth_groups (group_name, description) VALUES (%s, %s)",
+            (group_name, description or f"分组 {group_name}")
+        )
+        
+        conn.commit()
+        return {"success": True, "message": f"成功创建分组 '{group_name}'"}
+    
+    except Exception as e:
+        print(f"创建分组时发生错误: {e}")
+        return {"success": False, "message": "创建分组失败", "error": str(e)}
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
+def delete_group(group_name, force=False):
+    """删除分组"""
+    if not group_name:
+        return {"success": False, "message": "请提供分组名称", "error": "缺少分组名称"}
+    
+    group_name = group_name.strip()
+    if group_name == "default":
+        return {"success": False, "message": "不能删除默认分组", "error": "默认分组受保护"}
+    
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # 检查分组是否存在
+        cursor.execute("SELECT COUNT(*) as count FROM voice_auth_groups WHERE group_name = %s", (group_name,))
+        result = cursor.fetchone()
+        if result['count'] == 0:
+            return {"success": False, "message": f"分组 '{group_name}' 不存在", "error": "分组不存在"}
+        
+        # 检查分组下是否有用户
+        cursor.execute("SELECT COUNT(*) as count FROM voice_auth_users WHERE group_name = %s", (group_name,))
+        user_count = cursor.fetchone()['count']
+        
+        if user_count > 0 and not force:
+            return {
+                "success": False, 
+                "message": f"分组 '{group_name}' 下还有 {user_count} 个用户，请先删除用户或使用强制删除", 
+                "error": "分组非空"
+            }
+        
+        # 如果强制删除，先删除分组下的所有用户
+        if force and user_count > 0:
+            # 获取所有用户的声纹文件路径
+            cursor.execute(
+                "SELECT embedding_path FROM voice_auth_users WHERE group_name = %s",
+                (group_name,)
+            )
+            embedding_paths = cursor.fetchall()
+            
+            # 删除声纹文件
+            for record in embedding_paths:
+                embedding_path = record['embedding_path']
+                if os.path.exists(embedding_path):
+                    try:
+                        os.remove(embedding_path)
+                        print(f"删除声纹文件: {embedding_path}")
+                    except Exception as e:
+                        print(f"删除声纹文件失败 {embedding_path}: {e}")
+            
+            # 删除用户记录
+            cursor.execute("DELETE FROM voice_auth_users WHERE group_name = %s", (group_name,))
+        
+        # 删除分组
+        cursor.execute("DELETE FROM voice_auth_groups WHERE group_name = %s", (group_name,))
+        
+        conn.commit()
+        
+        if force and user_count > 0:
+            return {"success": True, "message": f"已强制删除分组 '{group_name}' 及其下的 {user_count} 个用户"}
+        else:
+            return {"success": True, "message": f"已删除分组 '{group_name}'"}
+    
+    except Exception as e:
+        print(f"删除分组时发生错误: {e}")
+        return {"success": False, "message": "删除分组失败", "error": str(e)}
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
+def list_groups():
+    """列出所有分组"""
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # 获取所有分组及其用户数量
+        cursor.execute("""
+            SELECT 
+                g.group_name, 
+                g.description, 
+                g.created_at,
+                COUNT(u.user_id) as user_count
+            FROM voice_auth_groups g
+            LEFT JOIN (
+                SELECT group_name, user_id 
+                FROM voice_auth_users 
+                GROUP BY group_name, user_id
+            ) u ON g.group_name = u.group_name
+            GROUP BY g.group_name, g.description, g.created_at
+            ORDER BY g.created_at
+        """)
+        
+        groups = cursor.fetchall()
+        
+        if not groups:
+            return {"success": True, "message": "暂无分组", "data": []}
+        
+        # 格式化结果
+        group_list = []
+        for group in groups:
+            group_list.append({
+                "group_name": group['group_name'],
+                "description": group['description'],
+                "user_count": group['user_count'],
+                "created_at": group['created_at'].strftime("%Y-%m-%d %H:%M:%S") if group['created_at'] else None
+            })
+        
+        return {"success": True, "message": f"共找到 {len(groups)} 个分组", "data": group_list}
+    
+    except Exception as e:
+        print(f"列出分组时发生错误: {e}")
+        return {"success": False, "message": "获取分组列表失败", "error": str(e)}
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
+def get_group_info(group_name):
+    """获取分组详细信息"""
+    if not group_name:
+        return {"success": False, "message": "请提供分组名称", "error": "缺少分组名称"}
+    
+    group_name = group_name.strip()
+    
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # 获取分组基本信息
+        cursor.execute(
+            "SELECT group_name, description, created_at FROM voice_auth_groups WHERE group_name = %s",
+            (group_name,)
+        )
+        group_info = cursor.fetchone()
+        
+        if not group_info:
+            return {"success": False, "message": f"分组 '{group_name}' 不存在", "error": "分组不存在"}
+        
+        # 获取用户统计信息
+        cursor.execute("""
+            SELECT 
+                COUNT(DISTINCT user_id) as user_count,
+                COUNT(*) as sample_count
+            FROM voice_auth_users 
+            WHERE group_name = %s
+        """, (group_name,))
+        
+        stats = cursor.fetchone()
+        
+        # 获取用户列表
+        cursor.execute("""
+            SELECT user_id, user_name, COUNT(*) as sample_count
+            FROM voice_auth_users 
+            WHERE group_name = %s
+            GROUP BY user_id, user_name
+            ORDER BY user_name
+        """, (group_name,))
+        
+        users = cursor.fetchall()
+        
+        result = {
+            "group_name": group_info['group_name'],
+            "description": group_info['description'],
+            "created_at": group_info['created_at'].strftime("%Y-%m-%d %H:%M:%S") if group_info['created_at'] else None,
+            "user_count": stats['user_count'] or 0,
+            "total_samples": stats['sample_count'] or 0,
+            "users": [
+                {
+                    "user_id": user['user_id'],
+                    "user_name": user['user_name'],
+                    "sample_count": user['sample_count']
+                }
+                for user in users
+            ]
+        }
+        
+        return {"success": True, "message": f"分组 '{group_name}' 信息", "data": result}
+    
+    except Exception as e:
+        print(f"获取分组信息时发生错误: {e}")
+        return {"success": False, "message": "获取分组信息失败", "error": str(e)}
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
 # 下载URL音频文件
 async def download_audio_from_url(url: str):
     try:
@@ -488,6 +772,94 @@ async def download_audio_from_url(url: str):
     except Exception as e:
         print(f"下载音频文件时发生错误: {e}")
         raise Exception(f"下载音频文件失败: {str(e)}")
+
+# TTS核心功能函数
+async def text_to_speech(text: str, voice: str = "zh-CN-XiaoyiNeural", 
+                        rate: str = "+0%", volume: str = "+0%", pitch: str = "+0Hz"):
+    """
+    使用edge-tts将文本转换为语音
+    """
+    try:
+        # 生成唯一的文件名
+        audio_filename = f"tts_{uuid.uuid4().hex}.mp3"
+        audio_path = TTS_AUDIO_DIR / audio_filename
+        
+        # 创建edge-tts的Communicate对象
+        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
+        
+        # 保存音频文件
+        await communicate.save(str(audio_path))
+        
+        return str(audio_path), audio_filename
+    except Exception as e:
+        print(f"TTS转换时发生错误: {e}")
+        raise Exception(f"TTS转换失败: {str(e)}")
+
+async def get_available_voices(language_filter: str = None):
+    """
+    获取可用的TTS语音列表
+    """
+    try:
+        voices = await edge_tts.list_voices()
+        
+        if language_filter:
+            # 过滤指定语言的语音
+            filtered_voices = [
+                voice for voice in voices 
+                if language_filter.lower() in voice["Locale"].lower()
+            ]
+            return filtered_voices
+        
+        return voices
+    except Exception as e:
+        print(f"获取语音列表时发生错误: {e}")
+        return []
+
+def get_voice_options():
+    """
+    获取常用语音选项（同步版本，用于Gradio）
+    """
+    common_voices = {
+        "中文女声(晓伊)": "zh-CN-XiaoyiNeural",
+        "中文男声(云扬)": "zh-CN-YunyangNeural", 
+        "中文女声(晓晓)": "zh-CN-XiaoxiaoNeural",
+        "中文男声(云希)": "zh-CN-YunxiNeural",
+        "英文女声(Aria)": "en-US-AriaNeural",
+        "英文男声(Davis)": "en-US-DavisNeural",
+        "日语女声(Nanami)": "ja-JP-NanamiNeural",
+        "韩语女声(Sun-Hi)": "ko-KR-SunHiNeural"
+    }
+    return common_voices
+
+def tts_gradio_wrapper(text: str, voice_name: str, rate: float, volume: float, pitch: float):
+    """
+    Gradio包装器函数（同步版本）
+    """
+    if not text.strip():
+        return None, "请输入要转换的文本"
+    
+    try:
+        # 获取语音选项
+        voice_options = get_voice_options()
+        voice_code = voice_options.get(voice_name, "zh-CN-XiaoyiNeural")
+        
+        # 格式化参数
+        rate_str = f"+{int(rate)}%" if rate >= 0 else f"{int(rate)}%"
+        volume_str = f"+{int(volume)}%" if volume >= 0 else f"{int(volume)}%"
+        pitch_str = f"+{int(pitch)}Hz" if pitch >= 0 else f"{int(pitch)}Hz"
+        
+        # 在新的事件循环中运行异步函数
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            audio_path, filename = loop.run_until_complete(
+                text_to_speech(text, voice_code, rate_str, volume_str, pitch_str)
+            )
+            return audio_path, f"✅ TTS转换成功！音频文件: {filename}"
+        finally:
+            loop.close()
+    except Exception as e:
+        return None, f"❌ TTS转换失败: {str(e)}"
 
 # 自定义API路由处理函数
 def add_custom_routes(fastapi_app):
@@ -653,6 +1025,210 @@ def add_custom_routes(fastapi_app):
             return ApiResponse(success=True, message=result)
         except Exception as e:
             return ApiResponse(success=False, error=str(e))
+    
+    # 组管理API接口
+    @fastapi_app.post("/api/create_group",
+                     summary="创建分组",
+                     description="创建新的用户分组",
+                     response_model=ApiResponse)
+    async def api_create_group(request: CreateGroupRequest):
+        try:
+            result = create_group(request.group_name, request.description)
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.post("/api/delete_group",
+                     summary="删除分组",
+                     description="删除指定分组，可选择是否强制删除（包括分组下的所有用户）",
+                     response_model=ApiResponse)
+    async def api_delete_group(request: DeleteGroupRequest):
+        try:
+            result = delete_group(request.group_name, request.force)
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.post("/api/list_groups",
+                     summary="列出所有分组",
+                     description="获取系统中所有分组的列表及其基本信息",
+                     response_model=ApiResponse)
+    async def api_list_groups(request: ListGroupsRequest):
+        try:
+            result = list_groups()
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.post("/api/group_info",
+                     summary="获取分组详细信息",
+                     description="获取指定分组的详细信息，包括用户列表和统计数据",
+                     response_model=ApiResponse)
+    async def api_group_info(request: GroupInfoRequest):
+        try:
+            result = get_group_info(request.group_name)
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    # 直接上传文件的组管理接口
+    @fastapi_app.post("/direct/create_group",
+                     summary="创建分组(表单格式)",
+                     description="通过表单创建新的用户分组",
+                     response_model=ApiResponse)
+    async def direct_create_group(
+        group_name: str = Form(..., description="分组名称"),
+        description: str = Form(None, description="分组描述，选填")
+    ):
+        try:
+            result = create_group(group_name, description)
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.post("/direct/delete_group",
+                     summary="删除分组(表单格式)",
+                     description="通过表单删除指定分组",
+                     response_model=ApiResponse)
+    async def direct_delete_group(
+        group_name: str = Form(..., description="要删除的分组名称"),
+        force: bool = Form(False, description="是否强制删除（包括分组下的所有用户）")
+    ):
+        try:
+            result = delete_group(group_name, force)
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.get("/direct/list_groups",
+                    summary="列出所有分组(GET请求)",
+                    description="获取系统中所有分组的列表及其基本信息",
+                    response_model=ApiResponse)
+    async def direct_list_groups():
+        try:
+            result = list_groups()
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.get("/direct/group_info/{group_name}",
+                    summary="获取分组详细信息(GET请求)",
+                    description="获取指定分组的详细信息",
+                    response_model=ApiResponse)
+    async def direct_group_info(group_name: str):
+        try:
+            result = get_group_info(group_name)
+            return ApiResponse(**result)
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    # TTS API接口
+    @fastapi_app.post("/api/tts",
+                     summary="文本转语音",
+                     description="将输入的文本转换为语音文件",
+                     response_model=ApiResponse)
+    async def api_text_to_speech(request: TTSRequest):
+        try:
+            audio_path, filename = await text_to_speech(
+                request.text, 
+                request.voice, 
+                request.rate, 
+                request.volume, 
+                request.pitch
+            )
+            
+            # 返回文件信息
+            return ApiResponse(
+                success=True, 
+                message="TTS转换成功",
+                data={
+                    "filename": filename,
+                    "audio_path": audio_path,
+                    "download_url": f"/api/tts/download/{filename}"
+                }
+            )
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.get("/api/tts/download/{filename}",
+                    summary="下载TTS音频文件",
+                    description="下载指定的TTS生成的音频文件")
+    async def download_tts_audio(filename: str):
+        try:
+            file_path = TTS_AUDIO_DIR / filename
+            if not file_path.exists():
+                return JSONResponse(
+                    status_code=404, 
+                    content={"error": "文件不存在"}
+                )
+            
+            return FileResponse(
+                path=str(file_path),
+                filename=filename,
+                media_type="audio/mpeg"
+            )
+        except Exception as e:
+            return JSONResponse(
+                status_code=500, 
+                content={"error": str(e)}
+            )
+    
+    @fastapi_app.post("/api/tts/voices",
+                     summary="获取可用语音列表",
+                     description="获取edge-tts支持的所有语音列表",
+                     response_model=ApiResponse)
+    async def api_get_voices(request: TTSVoicesRequest):
+        try:
+            voices = await get_available_voices(request.language)
+            return ApiResponse(
+                success=True,
+                message=f"获取到 {len(voices)} 个语音",
+                data={"voices": voices}
+            )
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    @fastapi_app.get("/api/tts/voices",
+                    summary="获取可用语音列表(GET)",
+                    description="获取edge-tts支持的所有语音列表",
+                    response_model=ApiResponse)
+    async def api_get_voices_get(language: str = None):
+        try:
+            voices = await get_available_voices(language)
+            return ApiResponse(
+                success=True,
+                message=f"获取到 {len(voices)} 个语音",
+                data={"voices": voices}
+            )
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+    
+    # 直接上传的TTS接口
+    @fastapi_app.post("/direct/tts",
+                     summary="文本转语音(表单格式)",
+                     description="通过表单提交文本进行TTS转换",
+                     response_model=ApiResponse)
+    async def direct_text_to_speech(
+        text: str = Form(..., description="要转换的文本"),
+        voice: str = Form("zh-CN-XiaoyiNeural", description="语音类型"),
+        rate: str = Form("+0%", description="语速调节，如：+20%、-10%"),
+        volume: str = Form("+0%", description="音量调节，如：+20%、-10%"),
+        pitch: str = Form("+0Hz", description="音调调节，如：+50Hz、-20Hz")
+    ):
+        try:
+            audio_path, filename = await text_to_speech(text, voice, rate, volume, pitch)
+            
+            return ApiResponse(
+                success=True,
+                message="TTS转换成功",
+                data={
+                    "filename": filename,
+                    "audio_path": audio_path,
+                    "download_url": f"/api/tts/download/{filename}"
+                }
+            )
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
 
 # 创建Gradio界面
 with gr.Blocks(title="声纹识别系统") as app:
@@ -690,6 +1266,92 @@ with gr.Blocks(title="声纹识别系统") as app:
                 del_btn = gr.Button("删除用户", variant="stop")
                 del_output = gr.Textbox(label="操作结果", lines=3)
     
+    with gr.Tab("分组管理"):
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 创建分组")
+                create_group_name = gr.Textbox(label="分组名称", placeholder="输入新分组名称")
+                create_group_desc = gr.Textbox(label="分组描述", placeholder="输入分组描述（可选）")
+                create_group_btn = gr.Button("创建分组", variant="primary")
+                create_group_output = gr.Textbox(label="创建结果", lines=2)
+                
+                gr.Markdown("### 删除分组")
+                delete_group_name = gr.Textbox(label="分组名称", placeholder="要删除的分组名称")
+                delete_group_force = gr.Checkbox(label="强制删除（包括分组下的所有用户）", value=False)
+                delete_group_btn = gr.Button("删除分组", variant="stop")
+                delete_group_output = gr.Textbox(label="删除结果", lines=2)
+            
+            with gr.Column():
+                gr.Markdown("### 分组列表")
+                groups_list = gr.Textbox(label="所有分组", lines=15)
+                refresh_groups_btn = gr.Button("刷新分组列表")
+                
+                gr.Markdown("### 分组详情")
+                group_info_name = gr.Textbox(label="分组名称", placeholder="输入要查询的分组名称")
+                group_info_btn = gr.Button("查询分组详情")
+                group_info_output = gr.Textbox(label="分组详情", lines=8)
+    
+    with gr.Tab("文本转语音(TTS)"):
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### TTS设置")
+                tts_text = gr.Textbox(
+                    label="输入文本", 
+                    placeholder="请输入要转换为语音的文本...",
+                    lines=5
+                )
+                
+                voice_options = get_voice_options()
+                tts_voice = gr.Dropdown(
+                    choices=list(voice_options.keys()),
+                    value="中文女声(晓伊)",
+                    label="选择语音"
+                )
+                
+                with gr.Row():
+                    tts_rate = gr.Slider(
+                        minimum=-50, maximum=100, value=0, step=5,
+                        label="语速调节(%)", 
+                        info="负数=慢，正数=快"
+                    )
+                    tts_volume = gr.Slider(
+                        minimum=-50, maximum=100, value=0, step=5,
+                        label="音量调节(%)",
+                        info="负数=小声，正数=大声"
+                    )
+                    tts_pitch = gr.Slider(
+                        minimum=-100, maximum=100, value=0, step=10,
+                        label="音调调节(Hz)",
+                        info="负数=低音，正数=高音"
+                    )
+                
+                tts_btn = gr.Button("生成语音", variant="primary", size="lg")
+                
+            with gr.Column():
+                gr.Markdown("### 生成结果")
+                tts_audio = gr.Audio(label="生成的语音", interactive=False)
+                tts_output = gr.Textbox(label="状态信息", lines=3)
+                
+                gr.Markdown("### 使用说明")
+                gr.Markdown("""
+                **TTS功能说明:**
+                - 支持中文、英文、日语、韩语等多种语言
+                - 可调节语速、音量和音调
+                - 生成的音频文件会保存在服务器上
+                - 支持API调用：`POST /api/tts`
+                
+                **API示例:**
+                ```json
+                {
+                    "text": "你好，世界！",
+                    "voice": "zh-CN-XiaoyiNeural",
+                    "rate": "+20%",
+                    "volume": "+10%",
+                    "pitch": "+0Hz"
+                }
+                ```
+                """)
+    
     # 功能连接
     reg_btn.click(register_user, inputs=[reg_audio, reg_user_id, reg_user_name, reg_group_name], outputs=reg_output)
     refresh_btn.click(list_users, inputs=[refresh_group], outputs=users_list)
@@ -707,6 +1369,67 @@ with gr.Blocks(title="声纹识别系统") as app:
 
     ident_btn.click(gradio_identify_wrapper, inputs=[ident_audio, threshold, ident_group], outputs=ident_output)
     del_btn.click(delete_user, inputs=[del_user_id, del_group], outputs=del_output)
+    
+    # 组管理功能连接
+    def gradio_create_group_wrapper(group_name, description):
+        result = create_group(group_name, description)
+        return result.get("message", "处理出错")
+    
+    def gradio_delete_group_wrapper(group_name, force):
+        result = delete_group(group_name, force)
+        return result.get("message", "处理出错")
+    
+    def gradio_list_groups_wrapper():
+        result = list_groups()
+        if result["success"]:
+            if result["data"]:
+                groups_text = f"{result['message']}\n\n"
+                for group in result["data"]:
+                    groups_text += f"📁 {group['group_name']}\n"
+                    groups_text += f"   描述: {group['description']}\n"
+                    groups_text += f"   用户数: {group['user_count']}\n"
+                    groups_text += f"   创建时间: {group['created_at']}\n\n"
+                return groups_text
+            else:
+                return result["message"]
+        else:
+            return f"错误: {result.get('error', '未知错误')}"
+    
+    def gradio_group_info_wrapper(group_name):
+        result = get_group_info(group_name)
+        if result["success"]:
+            data = result["data"]
+            info_text = f"分组名称: {data['group_name']}\n"
+            info_text += f"描述: {data['description']}\n"
+            info_text += f"创建时间: {data['created_at']}\n"
+            info_text += f"用户数量: {data['user_count']}\n"
+            info_text += f"声纹样本总数: {data['total_samples']}\n\n"
+            
+            if data['users']:
+                info_text += "用户列表:\n"
+                for user in data['users']:
+                    info_text += f"- {user['user_name']} (ID: {user['user_id']}) - {user['sample_count']} 个样本\n"
+            else:
+                info_text += "该分组下暂无用户"
+            
+            return info_text
+        else:
+            return f"错误: {result.get('error', '未知错误')}"
+    
+    create_group_btn.click(gradio_create_group_wrapper, inputs=[create_group_name, create_group_desc], outputs=create_group_output)
+    delete_group_btn.click(gradio_delete_group_wrapper, inputs=[delete_group_name, delete_group_force], outputs=delete_group_output)
+    refresh_groups_btn.click(gradio_list_groups_wrapper, inputs=None, outputs=groups_list)
+    group_info_btn.click(gradio_group_info_wrapper, inputs=[group_info_name], outputs=group_info_output)
+    
+    # 页面加载时刷新分组列表
+    app.load(gradio_list_groups_wrapper, inputs=None, outputs=groups_list)
+    
+    # TTS功能连接
+    tts_btn.click(
+        tts_gradio_wrapper,
+        inputs=[tts_text, tts_voice, tts_rate, tts_volume, tts_pitch],
+        outputs=[tts_audio, tts_output]
+    )
 
 # 启动应用
 if __name__ == "__main__":
